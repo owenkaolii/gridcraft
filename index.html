@@ -4,6 +4,21 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
   <title>GridCraft</title>
+  <script>
+  /* Snap support: keep what the app draws readable, so a picked area can be copied as a picture.
+     1) Hide WebGPU so the app uses WebGL2 (the app falls back to it by itself).
+     2) Ask WebGL to keep its last frame instead of clearing it. */
+  try { Object.defineProperty(navigator, "gpu", { value: undefined, configurable: true }); } catch (e) {}
+  (function () {
+    var orig = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (type, attrs) {
+      if (type === "webgl" || type === "webgl2" || type === "experimental-webgl") {
+        attrs = Object.assign({}, attrs || {}, { preserveDrawingBuffer: true });
+      }
+      return orig.call(this, type, attrs);
+    };
+  })();
+  </script>
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="GridCraft">
@@ -40,6 +55,124 @@ if ("serviceWorker" in navigator) {
 <script>
 document.addEventListener("selectstart", function (e) { e.preventDefault(); });
 document.addEventListener("contextmenu", function (e) { if (e.target.tagName === "CANVAS") e.preventDefault(); });
+</script>
+<script>
+/* Tap Alt/Option on its own (press and release, no other key) = F10,
+   so Excel-style access keys like Alt, H, O, I work on Apple keyboards.
+   Option held with a letter still types accented characters as normal. */
+(function () {
+  var altAlone = false;
+  function send(type) {
+    var t = document.activeElement || document.body;
+    t.dispatchEvent(new KeyboardEvent(type, { key: "F10", code: "F10", keyCode: 121, which: 121, bubbles: true, cancelable: true }));
+  }
+  addEventListener("keydown", function (e) {
+    altAlone = (e.key === "Alt" && !e.ctrlKey && !e.metaKey && !e.shiftKey);
+  }, true);
+  addEventListener("keyup", function (e) {
+    if (e.key === "Alt" && altAlone) { altAlone = false; e.preventDefault(); e.stopImmediatePropagation(); send("keydown"); send("keyup"); }
+  }, true);
+})();
+</script>
+<style>
+  #snapBtn{position:absolute;left:110px;bottom:3px;z-index:10;height:24px;padding:0 14px;
+    border:1px solid #217346;background:#fff;color:#217346;border-radius:4px;font:600 12px system-ui,sans-serif;cursor:pointer}
+  #snapLayer{position:absolute;inset:0;z-index:20;display:none;cursor:crosshair;background:rgba(0,0,0,.18);touch-action:none}
+  #snapBox{position:absolute;border:2px solid #217346;background:rgba(255,255,255,.08);display:none}
+  #snapHint{position:absolute;top:12px;left:50%;transform:translateX(-50%);background:#1a1a1a;color:#fff;
+    font:14px system-ui,sans-serif;padding:8px 14px;border-radius:6px;white-space:nowrap}
+  #snapPanel{position:absolute;inset:0;z-index:30;display:none;background:rgba(0,0,0,.45);align-items:center;justify-content:center}
+  #snapCard{background:#fff;border-radius:8px;padding:14px;max-width:92vw;max-height:88vh;display:flex;flex-direction:column;gap:12px}
+  #snapImg{max-width:86vw;max-height:66vh;border:1px solid #ddd;align-self:center}
+  #snapRow{display:flex;gap:8px;justify-content:flex-end;align-items:center}
+  #snapRow button{height:36px;padding:0 18px;border-radius:5px;font:600 14px system-ui,sans-serif;cursor:pointer;border:1px solid #217346}
+  #snapRow .main{background:#217346;color:#fff}
+  #snapRow .sub{background:#fff;color:#217346}
+  #snapMsg{font:13px system-ui,sans-serif;color:#217346;margin-right:auto}
+</style>
+<button id="snapBtn" type="button">Snap</button>
+<div id="snapLayer"><div id="snapHint">Drag over the cells to snap &middot; tap outside to cancel</div><div id="snapBox"></div></div>
+<div id="snapPanel"><div id="snapCard">
+  <img id="snapImg" alt="Snapped cells">
+  <div id="snapRow"><span id="snapMsg"></span>
+    <button class="sub" id="snapCancel" type="button">Close</button>
+    <button class="sub" id="snapShare" type="button">Share</button>
+    <button class="main" id="snapCopy" type="button">Copy</button></div>
+</div></div>
+<script>
+/* Snap: drag a box over the sheet, then copy it as a PNG (paste into WhatsApp) or share it. */
+(function () {
+  var btn = document.getElementById("snapBtn"), layer = document.getElementById("snapLayer"),
+      box = document.getElementById("snapBox"), panel = document.getElementById("snapPanel"),
+      img = document.getElementById("snapImg"), msg = document.getElementById("snapMsg");
+  var start = null, blob = null;
+
+  btn.addEventListener("click", function () { layer.style.display = "block"; box.style.display = "none"; });
+
+  layer.addEventListener("pointerdown", function (e) {
+    layer.setPointerCapture(e.pointerId);
+    start = { x: e.clientX, y: e.clientY };
+    draw(e);
+    box.style.display = "block";
+  });
+  layer.addEventListener("pointermove", function (e) { if (start) draw(e); });
+  layer.addEventListener("pointerup", function (e) {
+    if (!start) return;
+    var r = rect(e); start = null;
+    layer.style.display = "none"; box.style.display = "none";
+    if (r.w < 8 || r.h < 8) return;          // a tap, not a drag: treat as cancel
+    grab(r);
+  });
+
+  function rect(e) {
+    var x = Math.min(start.x, e.clientX), y = Math.min(start.y, e.clientY);
+    return { x: x, y: y, w: Math.abs(e.clientX - start.x), h: Math.abs(e.clientY - start.y) };
+  }
+  function draw(e) {
+    var r = rect(e);
+    box.style.left = r.x + "px"; box.style.top = r.y + "px";
+    box.style.width = r.w + "px"; box.style.height = r.h + "px";
+  }
+
+  function grab(r) {
+    var c = document.querySelector("canvas");
+    var b = c.getBoundingClientRect();
+    var sx = c.width / b.width, sy = c.height / b.height;
+    var out = document.createElement("canvas");
+    out.width = Math.round(r.w * sx); out.height = Math.round(r.h * sy);
+    var g = out.getContext("2d");
+    g.fillStyle = "#fff"; g.fillRect(0, 0, out.width, out.height);
+    g.drawImage(c, (r.x - b.left) * sx, (r.y - b.top) * sy, out.width, out.height, 0, 0, out.width, out.height);
+    out.toBlob(function (bl) {
+      blob = bl;
+      img.src = URL.createObjectURL(bl);
+      msg.textContent = "";
+      panel.style.display = "flex";
+    }, "image/png");
+  }
+
+  document.getElementById("snapCopy").addEventListener("click", function () {
+    if (!blob) return;
+    try {
+      navigator.clipboard.write([new ClipboardItem({ "image/png": blob })])
+        .then(function () { msg.textContent = "Copied. Paste it in WhatsApp."; })
+        .catch(function () { msg.textContent = "Copy was blocked. Use Share instead."; });
+    } catch (e) { msg.textContent = "Copy isn't supported here. Use Share instead."; }
+  });
+  document.getElementById("snapShare").addEventListener("click", function () {
+    if (!blob) return;
+    var f = new File([blob], "gridcraft-snap.png", { type: "image/png" });
+    if (navigator.canShare && navigator.canShare({ files: [f] })) {
+      navigator.share({ files: [f] }).catch(function () {});
+    } else {
+      var a = document.createElement("a");
+      a.href = URL.createObjectURL(blob); a.download = "gridcraft-snap.png"; a.click();
+    }
+  });
+  function close() { panel.style.display = "none"; blob = null; }
+  document.getElementById("snapCancel").addEventListener("click", close);
+  panel.addEventListener("click", function (e) { if (e.target === panel) close(); });
+})();
 </script>
 </body>
 </html>
